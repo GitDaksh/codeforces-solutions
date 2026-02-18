@@ -2,13 +2,12 @@ name: Codeforces Auto-Sync
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
-  workflow_dispatch:
+    - cron: "*/30 * * * *"   # every 30 min (GitHub minimum is ~5 min, but 15 is spammy)
+  workflow_dispatch:          # allow manual trigger from Actions tab
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -26,9 +25,10 @@ jobs:
 
       - name: Run sync script
         env:
-          CF_HANDLE: "Lyraen"
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          GH_REPO: ${{ github.repository }}
+          CF_HANDLE:   "Lyraen"
+          CF_PASSWORD: ${{ secrets.CF_PASSWORD }}   # ← NEW: add this secret
+          GH_TOKEN:    ${{ secrets.GH_TOKEN }}
+          GH_REPO:     ${{ github.repository }}
         run: python sync.py
 
       - name: Commit and push changes
@@ -37,5 +37,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}
           git add .
-          git diff --staged --quiet || git commit -m "🤖 Auto-sync Codeforces submissions"
+          git diff --staged --quiet && echo "No changes to commit" || git commit -m "🤖 Auto-sync Codeforces submissions"
           git push
