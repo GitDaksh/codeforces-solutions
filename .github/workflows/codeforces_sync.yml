@@ -2,8 +2,8 @@ name: Codeforces Auto-Sync
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 min (GitHub minimum is ~5 min, but 15 is spammy)
-  workflow_dispatch:          # allow manual trigger from Actions tab
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -25,10 +25,11 @@ jobs:
 
       - name: Run sync script
         env:
-          CF_HANDLE:   "Lyraen"
-          CF_PASSWORD: ${{ secrets.CF_PASSWORD }}   # ← NEW: add this secret
-          GH_TOKEN:    ${{ secrets.GH_TOKEN }}
-          GH_REPO:     ${{ github.repository }}
+          CF_HANDLE:      "Lyraen"
+          CF_API_KEY:     ${{ secrets.CF_API_KEY }}
+          CF_API_SECRET:  ${{ secrets.CF_API_SECRET }}
+          GH_TOKEN:       ${{ secrets.GH_TOKEN }}
+          GH_REPO:        ${{ github.repository }}
         run: python sync.py
 
       - name: Commit and push changes
