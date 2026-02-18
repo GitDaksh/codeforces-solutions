@@ -2,36 +2,38 @@ import os
 import re
 import json
 import time
+import hashlib
+import random
+import string
 import requests
-from urllib.parse import urlencode
 
 # ── Configuration ────────────────────────────────────────────────────────────
-CF_HANDLE   = os.environ["CF_HANDLE"]    # your Codeforces handle
-CF_PASSWORD = os.environ["CF_PASSWORD"]  # your Codeforces password  ← NEW
-GH_TOKEN    = os.environ["GH_TOKEN"]     # your GitHub token
-GH_REPO     = os.environ["GH_REPO"]     # e.g. "username/repo-name"
+CF_HANDLE     = os.environ["CF_HANDLE"]
+CF_API_KEY    = os.environ["CF_API_KEY"]      # from codeforces.com/settings/api
+CF_API_SECRET = os.environ["CF_API_SECRET"]   # from codeforces.com/settings/api
+GH_TOKEN      = os.environ["GH_TOKEN"]
+GH_REPO       = os.environ["GH_REPO"]
 
 HISTORY_FILE    = "submission_history.json"
 SUBMISSIONS_DIR = "submissions"
 
-# Maps Codeforces language names → file extensions
 LANG_EXT = {
-    "gnu g++20 11.2.0 (64 bit)": "cpp",
-    "gnu g++17 7.3.0":           "cpp",
+    "gnu g++20 11.2.0 (64 bit)":         "cpp",
+    "gnu g++17 7.3.0":                   "cpp",
     "gnu g++17 9.2.0 (64 bit, msys 2)": "cpp",
-    "gnu g++14 6.4.0":           "cpp",
-    "clang++17 diagnostics":     "cpp",
-    "python 3.8.3":              "py",
-    "python 3.11 (64)":          "py",
-    "pypy 3.9.10 (64bit)":       "py",
-    "java 17 64bit":             "java",
-    "java 11 64bit":             "java",
-    "java 8 32bit":              "java",
-    "kotlin 1.7":                "kt",
-    "javascript v8 4.8.0":       "js",
-    "c# 10":                     "cs",
-    "go 1.19.5":                 "go",
-    "rust 2021":                 "rs",
+    "gnu g++14 6.4.0":                   "cpp",
+    "clang++17 diagnostics":             "cpp",
+    "python 3.8.3":                      "py",
+    "python 3.11 (64)":                  "py",
+    "pypy 3.9.10 (64bit)":              "py",
+    "java 17 64bit":                     "java",
+    "java 11 64bit":                     "java",
+    "java 8 32bit":                      "java",
+    "kotlin 1.7":                        "kt",
+    "javascript v8 4.8.0":              "js",
+    "c# 10":                             "cs",
+    "go 1.19.5":                         "go",
+    "rust 2021":                         "rs",
 }
 
 def get_extension(lang: str) -> str:
@@ -52,127 +54,67 @@ def get_extension(lang: str) -> str:
 def load_history() -> set:
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE) as f:
-            data = json.load(f)
-        return set(str(x) for x in data)
+            return set(str(x) for x in json.load(f))
     return set()
 
 def save_history(history: set):
     with open(HISTORY_FILE, "w") as f:
         json.dump(sorted(list(history)), f, indent=2)
 
-def cf_login(session: requests.Session, handle: str, password: str) -> bool:
-    """Log into Codeforces using handle + password. Returns True on success."""
-    login_url = "https://codeforces.com/enter"
-    print("Logging into Codeforces...")
+def signed_url(method: str, params: dict) -> str:
+    """Build a signed Codeforces API URL."""
+    rand = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    p = dict(params)
+    p["apiKey"] = CF_API_KEY
+    p["time"]   = str(int(time.time()))
+    sorted_params = "&".join(f"{k}={v}" for k, v in sorted(p.items()))
+    sig_str  = f"{rand}/{method}?{sorted_params}#{CF_API_SECRET}"
+    p["apiSig"] = rand + hashlib.sha512(sig_str.encode()).hexdigest()
+    return f"https://codeforces.com/api/{method}", p
 
-    # Step 1: GET the login page to grab the CSRF token
-    r = session.get(login_url, timeout=15)
-    if r.status_code != 200:
-        print(f"  Failed to load login page: HTTP {r.status_code}")
-        return False
-
-    # Extract CSRF token from the page
-    csrf_match = re.search(r'csrf_token" value="([^"]+)"', r.text)
-    if not csrf_match:
-        # Try alternative pattern
-        csrf_match = re.search(r"'X-Csrf-Token'\s*:\s*'([^']+)'", r.text)
-    if not csrf_match:
-        print("  Could not find CSRF token on login page.")
-        return False
-    csrf_token = csrf_match.group(1)
-
-    # Step 2: POST credentials
-    payload = {
-        "csrf_token":  csrf_token,
-        "action":      "enter",
-        "ftaa":        "",
-        "bfaa":        "",
-        "handleOrEmail": handle,
-        "password":    password,
-        "remember":    "on",
-        "_tta":        "176",
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; CF-GitHub-Sync/2.0)",
-        "Referer":    login_url,
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    r2 = session.post(login_url, data=payload, headers=headers, timeout=15)
-
-    # If we're no longer on /enter, login succeeded
-    if "enter" not in r2.url and r2.status_code == 200:
-        print("  ✅ Logged in successfully.")
-        return True
-
-    # Double-check by looking for the handle in the page
-    if handle.lower() in r2.text.lower() and "logout" in r2.text.lower():
-        print("  ✅ Logged in successfully.")
-        return True
-
-    print("  ❌ Login failed. Check CF_HANDLE and CF_PASSWORD secrets.")
-    return False
-
-def fetch_accepted_submissions(handle: str, count: int = 10000) -> list:
-    """Fetch all accepted submissions from Codeforces API (up to `count`)."""
-    url = f"https://codeforces.com/api/user.status?handle={handle}&from=1&count={count}"
-    print(f"Fetching submissions for {handle}...")
+def cf_api(method: str, params: dict):
+    url, p = signed_url(method, params)
     try:
-        r = requests.get(url, timeout=30)
+        r = requests.get(url, params=p, timeout=30)
         r.raise_for_status()
         data = r.json()
-        if data["status"] != "OK":
-            print(f"CF API error: {data.get('comment', 'unknown error')}")
-            return []
-        accepted = [s for s in data["result"] if s.get("verdict") == "OK"]
-        print(f"Found {len(accepted)} accepted submissions")
-        return accepted
+        if data["status"] == "OK":
+            return data["result"]
+        print(f"  CF API error [{method}]: {data.get('comment')}")
     except Exception as e:
-        print(f"Error fetching submissions: {e}")
+        print(f"  Request failed [{method}]: {e}")
+    return None
+
+def fetch_accepted_submissions() -> list:
+    print(f"Fetching submissions for {CF_HANDLE}...")
+    result = cf_api("user.status", {"handle": CF_HANDLE, "from": "1", "count": "10000"})
+    if not result:
         return []
+    accepted = [s for s in result if s.get("verdict") == "OK"]
+    print(f"Found {len(accepted)} accepted submissions")
+    return accepted
 
-def get_submission_code(session: requests.Session, contest_id, submission_id: int) -> str | None:
-    """Fetch source code of a submission using an authenticated session."""
-    url = f"https://codeforces.com/contest/{contest_id}/submission/{submission_id}"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; CF-GitHub-Sync/2.0)"}
-    try:
-        r = session.get(url, headers=headers, timeout=15)
-        content = r.text
+def fetch_source(contest_id, submission_id: int) -> str | None:
+    """
+    Fetch submission source code via the authenticated CF API.
+    Endpoint: https://codeforces.com/api/contest.submission
+    This is the official way to get your own submission source.
+    """
+    result = cf_api("contest.submission", {
+        "contestId":    str(contest_id),
+        "submissionId": str(submission_id),
+    })
+    if result and isinstance(result, dict):
+        src = result.get("source")
+        if src:
+            return src
+    # result might be a list
+    if result and isinstance(result, list) and result[0].get("source"):
+        return result[0]["source"]
+    return None
 
-        # Primary: <pre id="program-source-text" ...>CODE</pre>
-        start_tag = '<pre id="program-source-text"'
-        start = content.find(start_tag)
-        if start != -1:
-            start = content.find('>', start) + 1
-            end   = content.find('</pre>', start)
-            if end != -1:
-                code = content[start:end]
-                code = unescape(code)
-                return code
-
-        # Fallback: some contest types use a different class
-        alt_match = re.search(
-            r'<pre[^>]+class="[^"]*prettyprint[^"]*"[^>]*>(.*?)</pre>',
-            content, re.DOTALL
-        )
-        if alt_match:
-            return unescape(alt_match.group(1))
-
-        print(f"    Could not find source code in page (possibly not logged in?)")
-        return None
-    except Exception as e:
-        print(f"    Error fetching code for submission {submission_id}: {e}")
-        return None
-
-def unescape(html: str) -> str:
-    return (html
-        .replace("&lt;",   "<")
-        .replace("&gt;",   ">")
-        .replace("&amp;",  "&")
-        .replace("&quot;", '"')
-        .replace("&#39;",  "'")
-        .replace("&#x27;", "'")
-        .replace("&#x2F;", "/")
-    )
+def sanitize(name: str) -> str:
+    return re.sub(r'[\\/:*?"<>|]', '-', name)
 
 def save_file(filepath: str, content: str):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -181,34 +123,26 @@ def save_file(filepath: str, content: str):
 
 def main():
     history     = load_history()
-    submissions = fetch_accepted_submissions(CF_HANDLE)
+    submissions = fetch_accepted_submissions()
 
-    # Authenticate with Codeforces so we can read submission source code
-    session = requests.Session()
-    logged_in = cf_login(session, CF_HANDLE, CF_PASSWORD)
-    if not logged_in:
-        print("Aborting: cannot fetch source code without login.")
-        raise SystemExit(1)
-
-    new_count = 0
+    # Keep only the most recent accepted sub per problem (avoid duplicates)
+    seen = {}
     for sub in submissions:
-        sub_id = str(sub["id"])
-        if sub_id in history:
-            continue  # already saved
+        key = (sub.get("contestId"), sub.get("problem", {}).get("index"))
+        if key not in seen:
+            seen[key] = sub
+    unique = list(seen.values())
+    print(f"Unique problems solved: {len(unique)}")
 
+    new_count  = 0
+    fail_count = 0
+
+    for sub in unique:
+        sub_id        = str(sub["id"])
         contest_id    = sub.get("contestId", "gym")
         problem       = sub.get("problem", {})
         problem_index = problem.get("index", "X")
-        problem_name  = (problem.get("name", "Unknown")
-                         .replace("/", "-")
-                         .replace("\\", "-")
-                         .replace(":", "-")
-                         .replace("*", "-")
-                         .replace("?", "")
-                         .replace('"', "")
-                         .replace("<", "")
-                         .replace(">", "")
-                         .replace("|", "-"))
+        problem_name  = sanitize(problem.get("name", "Unknown"))
         lang          = sub.get("programmingLanguage", "cpp")
         ext           = get_extension(lang)
 
@@ -216,26 +150,27 @@ def main():
         filename  = f"{contest_id}_{problem_index}_{safe_name}.{ext}"
         filepath  = os.path.join(SUBMISSIONS_DIR, filename)
 
-        # Skip if file already exists on disk (e.g. history file was lost)
-        if os.path.exists(filepath):
+        # Already saved
+        if sub_id in history or os.path.exists(filepath):
             history.add(sub_id)
             continue
 
-        print(f"  Fetching code for submission {sub_id} ({contest_id}{problem_index} - {problem_name})...")
-        code = get_submission_code(session, contest_id, sub_id)
+        print(f"  [{contest_id}{problem_index}] {problem_name}  (sub {sub_id})")
+        code = fetch_source(contest_id, sub_id)
 
         if code:
             save_file(filepath, code)
             history.add(sub_id)
             new_count += 1
-            print(f"    ✅ Saved: {filename}")
+            print(f"    ✅ {filename}")
         else:
-            print(f"    ⚠️  Could not fetch code for {sub_id}, skipping")
+            fail_count += 1
+            print(f"    ⚠️  No source returned for submission {sub_id}")
 
-        time.sleep(1.5)  # be polite to Codeforces servers
+        time.sleep(0.5)
 
     save_history(history)
-    print(f"\nDone! Added {new_count} new submission(s).")
+    print(f"\nDone! Saved {new_count} new submission(s). Failed: {fail_count}.")
 
 if __name__ == "__main__":
     main()
